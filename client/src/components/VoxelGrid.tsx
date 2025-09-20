@@ -6,6 +6,7 @@ interface GameState {
   w: number;
   h: number;
   data: number[];
+  chunk_id? : string;
 }
 
 interface VoxelGridProps {
@@ -20,20 +21,20 @@ const VoxelGrid: React.FC<VoxelGridProps> = ({
   const [playerCount, setPlayerCount] = useState(0);
   const [lastAction, setLastAction] = useState<string>('');
   const wsRef = useRef<WebSocket | null>(null);
-  const reconnectTimeoutRef = useRef<NodeJS.Timeout>();
+  // const reconnectTimeoutRef = useRef<NodeJS.Timeout>();//??? mabue prefer to remain
+    const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const reconnectingRef = useRef<boolean>(false); // חדש
 
-  // Dynamically construct WebSocket URL based on current page
   const getWebSocketUrl = () => {
 
     if (serverUrl) return serverUrl;
-    if (WS_URL) return WS_URL;   // ← נוספה השורה הזאת
-
+    if (WS_URL) return WS_URL;
+    console.log("don't succeed to find the url in the env file")
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const host = window.location.host;
     return `${protocol}//${host}/ws`;
   };
 
-  // Convert 2-bit color values (0-3) to CSS colors
   const getColorFromBits = useCallback((value: number) => {
     const getBit = (v: number, bit: number) => (v >> bit) & 1;
     const get2Bits = (v: number, b0: number, b1: number) => 
@@ -43,14 +44,17 @@ const VoxelGrid: React.FC<VoxelGridProps> = ({
     const g = get2Bits(value, 3, 6); // BIT_G0=3, BIT_G1=6
     const b = get2Bits(value, 4, 7); // BIT_B0=4, BIT_B1=7
 
-    // Map 0-3 values to 0-255 with nice color distribution
     const colorMap = [0, 85, 170, 255];
     return `rgb(${colorMap[r]}, ${colorMap[g]}, ${colorMap[b]})`;
   }, []);
 
   const connectWebSocket = useCallback(() => {
-    if (wsRef.current?.readyState === WebSocket.OPEN) return;
-
+    // if (wsRef.current?.readyState === WebSocket.OPEN) return;
+   if (
+     wsRef.current &&
+     (wsRef.current.readyState === WebSocket.OPEN ||
+      wsRef.current.readyState === WebSocket.CONNECTING)   ) {
+     return; }
     try {
       const ws = new WebSocket(getWebSocketUrl());
       wsRef.current = ws;
@@ -64,11 +68,7 @@ const VoxelGrid: React.FC<VoxelGridProps> = ({
         try {
           const data = JSON.parse(event.data);
           if (data.type === 'matrix') {
-            setGameState({
-              w: data.w,
-              h: data.h,
-              data: data.data
-            });
+           setGameState({ w: data.w, h: data.h, data: data.data, chunk_id: data.chunk_id });
             
             // Count players (cells with BIT_IS_PLAYER set)
             const players = data.data.filter((cell: number) => (cell & 1) === 1);
@@ -83,12 +83,20 @@ const VoxelGrid: React.FC<VoxelGridProps> = ({
         setConnected(false);
         setGameState(null);
         setPlayerCount(0);
+
+        if (!reconnectingRef.current) {
+     reconnectingRef.current = true;
+     reconnectTimeoutRef.current = setTimeout(() => {
+      reconnectingRef.current = false;
+       connectWebSocket();
+     }, 3000);}
+   };
         
         // Attempt reconnection after 3 seconds
-        reconnectTimeoutRef.current = setTimeout(() => {
-          connectWebSocket();
-        }, 3000);
-      };
+      //   reconnectTimeoutRef.current = setTimeout(() => {
+      //     connectWebSocket();
+      //   }, 3000);
+      // };
 
       ws.onerror = (error) => {
         console.error('WebSocket error:', error);
@@ -150,12 +158,12 @@ const VoxelGrid: React.FC<VoxelGridProps> = ({
     connectWebSocket();
     
     return () => {
-      if (reconnectTimeoutRef.current) {
-        clearTimeout(reconnectTimeoutRef.current);
-      }
-      if (wsRef.current) {
-        wsRef.current.close();
-      }
+   
+    if (reconnectTimeoutRef.current) {
+       clearTimeout(reconnectTimeoutRef.current);
+       reconnectTimeoutRef.current = null;
+     }
+     try { wsRef.current?.close(); wsRef.current = null; } catch {}
     };
   }, [connectWebSocket]);
 
@@ -173,7 +181,24 @@ const VoxelGrid: React.FC<VoxelGridProps> = ({
         const index = r * gameState.w + c;
         const cellValue = gameState.data[index];
         const isPlayer = (cellValue & 1) === 1;
-        
+
+
+        const getBit = (v: number, bit: number) => (v >> bit) & 1;
+        const get2Bits = (v: number, b0: number, b1: number) =>
+          (getBit(v, b1) << 1) | getBit(v, b0);
+
+        // קוראים את ערוצי הקרקע (0..3 לכל ערוץ)
+        const r2 = get2Bits(cellValue, 2, 5);
+        const g2 = get2Bits(cellValue, 3, 6);
+        const b2 = get2Bits(cellValue, 4, 7);
+
+        // תא "ריק": אין שחקן וכל הצבעים 0
+        const isBlankGround = !isPlayer && r2 === 0 && g2 === 0 && b2 === 0;
+
+        // ממפים 0..3 ל־0..255 (אותה מפה שיש לך)
+        const map = [0, 85, 170, 255];
+        const color = `rgb(${map[r2]}, ${map[g2]}, ${map[b2]})`;
+
         cells.push(
           <div
             key={`${r}-${c}`}
@@ -182,10 +207,16 @@ const VoxelGrid: React.FC<VoxelGridProps> = ({
               ${isPlayer ? 'voxel-player' : 'voxel-empty'}
             `}
             style={{
-              backgroundColor: isPlayer ? getColorFromBits(cellValue) : 'transparent',
+              // תא ריק => שקוף (רואים רקע יפה),
+              // תא שנצבע או יש עליו שחקן => לפי ביטי הצבע
+              backgroundColor: isBlankGround ? 'transparent' : color,
+              // אופציונלי: הדגשה קלה לשחקן
+              outline: isPlayer ? '1px solid rgba(255,255,255,0.6)' : 'none',
             }}
           />
         );
+  
+
       }
     }
     return cells;
@@ -296,3 +327,5 @@ const VoxelGrid: React.FC<VoxelGridProps> = ({
 };
 
 export default VoxelGrid;
+
+

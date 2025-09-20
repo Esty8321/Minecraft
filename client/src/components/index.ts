@@ -1,1 +1,0 @@
-export { default as VoxelGrid } from './VoxelGrid.tsx';
